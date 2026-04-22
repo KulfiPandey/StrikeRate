@@ -30,8 +30,9 @@ def standardize_team_name(name):
         'gt': 'GT',
         'sunrisers hyderabad': 'SRH',
         'srh': 'SRH',
-        'deccan chargers': 'DC',    # Deccan Chargers (defunct) - map to DC? Or keep separate?
-        'dc': 'DC',
+        # Defunct teams (kept distinct so historical joins don't silently collide)
+        'deccan chargers': 'DEC',
+        'deccan': 'DEC',
         'kochi tuskers kerala': 'KTK',
         'ktk': 'KTK',
         'pune warriors': 'PW',

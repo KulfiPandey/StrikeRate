@@ -11,6 +11,7 @@
 
 import os
 import json
+import csv
 import requests
 import zipfile
 from tqdm import tqdm
@@ -50,23 +51,28 @@ def parse_info_file(filepath):
     info = {}
     players = {}
 
-    with open(filepath, 'r') as f:
-        for line in f:
-            parts = line.strip().split(',')
+    # Use the csv module so quoted commas don't break parsing
+    # (e.g. venue names or cities containing commas).
+    with open(filepath, "r", newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for parts in reader:
             if len(parts) < 2:
                 continue
-            key = parts[1]
 
-            if key == 'team':
-                info.setdefault('teams', []).append(parts[2])
-            elif key == 'player':
-                team = parts[2]
-                player = parts[3]
-                players.setdefault(team, []).append(player)
-            elif key == 'registry':
-                pass
-            elif len(parts) == 3:
-                info[key] = parts[2]
+            key = parts[1].strip()
+
+            if key == "team" and len(parts) >= 3:
+                info.setdefault("teams", []).append(parts[2].strip())
+            elif key == "player" and len(parts) >= 4:
+                team = parts[2].strip()
+                player = parts[3].strip()
+                if team and player:
+                    players.setdefault(team, []).append(player)
+            elif key == "registry":
+                continue
+            elif len(parts) >= 3:
+                # Some keys may have extra columns; we take the first value column.
+                info[key] = parts[2].strip()
 
     info['players'] = players
     return info

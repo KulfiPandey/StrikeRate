@@ -5,18 +5,19 @@ from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import LabelEncoder
 import sys
+
 sys.path.append(str(Path(__file__).parent.parent))
 from config import PROCESSED_DIR
 
 
 FEATURES = [
-    "team1_enc","team2_enc","venue_enc",
-    "team1_elo","team2_elo","elo_diff",
-    "team1_form","team2_form","form_diff",
-    "team1_bat_sr","team2_bat_sr","sr_diff",
+    "team1_enc", "team2_enc", "venue_enc",
+    "team1_elo", "team2_elo", "elo_diff",
+    "team1_form", "team2_form", "form_diff",
+    "team1_bat_sr", "team2_bat_sr", "sr_diff",
     "head_to_head",
-    "venue_bat_first_wr","venue_t1_wr",
-    "toss_is_team1","toss_decision_enc"
+    "venue_bat_first_wr", "venue_t1_wr",
+    "toss_is_team1", "toss_decision_enc"
 ]
 
 
@@ -52,7 +53,7 @@ def encode(train, test):
 def evaluate(df):
     seasons = sorted(df["season"].unique())
 
-    print("\n── Rolling Window ──")
+    print("\n-- Rolling Window --")
     for i in range(3, len(seasons)):
         train = df[df["season"] < seasons[i]].copy()
         test = df[df["season"] == seasons[i]].copy()
@@ -74,7 +75,7 @@ def evaluate(df):
         model.fit(X_tr, y_tr)
 
         acc = accuracy_score(y_te, model.predict(X_te))
-        print(f"{seasons[i]} → {acc:.2%}")
+        print(f"{seasons[i]} -> {acc:.2%}")
 
     # Final
     train = df[df["season"] <= 2022].copy()
@@ -97,7 +98,7 @@ def evaluate(df):
     acc = accuracy_score(y_te, preds)
     base = max(y_te.mean(), 1 - y_te.mean())
 
-    print("\n── FINAL MODEL ──")
+    print("\n-- FINAL MODEL --")
     print(f"Accuracy: {acc:.2%}")
     print(f"Baseline: {base:.2%}")
     print(f"Lift: +{(acc-base):.2%}")
