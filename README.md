@@ -32,6 +32,19 @@ Train/evaluate a model:
 python models\honest_predictor.py
 ```
 
+Train the calibrated pre-match model (recommended for odds work):
+
+```powershell
+python strike.py train-prematch
+```
+
+Fetch odds + generate value-bets table:
+
+```powershell
+python strike.py fetch-odds
+python strike.py value-bets
+```
+
 ## Data layout
 
 - `data/raw/`: Cricsheet match CSVs + `_info.csv` files

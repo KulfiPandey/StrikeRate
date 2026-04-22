@@ -30,6 +30,10 @@ def cmd_train_match(_: argparse.Namespace) -> None:
     _run(str(ROOT / "models" / "match_predictor.py"))
 
 
+def cmd_train_prematch(_: argparse.Namespace) -> None:
+    _run(str(ROOT / "models" / "pre_match_model.py"))
+
+
 def cmd_fetch_odds(_: argparse.Namespace) -> None:
     _run(str(ROOT / "pipeline" / "fetch_polymarket_odds.py"))
 
@@ -50,6 +54,10 @@ def cmd_x_features(_: argparse.Namespace) -> None:
     _run(str(ROOT / "pipeline" / "social_features.py"))
 
 
+def cmd_value_bets(_: argparse.Namespace) -> None:
+    _run(str(ROOT / "pipeline" / "value_bets.py"))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="strike",
@@ -66,6 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("train-match", help="Train/evaluate match outcome model (match_features).")
     s.set_defaults(func=cmd_train_match)
 
+    s = sub.add_parser("train-prematch", help="Train calibrated pre-match model (saves artifacts).")
+    s.set_defaults(func=cmd_train_prematch)
+
     s = sub.add_parser("fetch-odds", help="Fetch Polymarket odds into data/processed.")
     s.set_defaults(func=cmd_fetch_odds)
 
@@ -79,6 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("x-features", help="Build X buzz features and merge into pre-match dataset.")
     s.set_defaults(func=cmd_x_features)
+
+    s = sub.add_parser("value-bets", help="Merge model probs with Polymarket odds and rank edges.")
+    s.set_defaults(func=cmd_value_bets)
 
     return p
 
