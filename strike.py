@@ -9,9 +9,25 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 
 
+def _preferred_python() -> str:
+    """
+    Prefer the repo-local venv interpreter when present so commands work even if the
+    caller's global Python doesn't have deps installed.
+    """
+    venv_py_win = ROOT / ".venv" / "Scripts" / "python.exe"
+    if venv_py_win.exists():
+        return str(venv_py_win)
+
+    venv_py_posix = ROOT / ".venv" / "bin" / "python"
+    if venv_py_posix.exists():
+        return str(venv_py_posix)
+
+    return sys.executable
+
+
 def _run(module_or_path: str, args: list[str] | None = None) -> None:
     args = args or []
-    cmd = [sys.executable, module_or_path, *args]
+    cmd = [_preferred_python(), module_or_path, *args]
     print(f"\n$ {' '.join(cmd)}")
     subprocess.check_call(cmd, cwd=str(ROOT))
 
