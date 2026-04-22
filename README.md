@@ -45,6 +45,12 @@ python strike.py fetch-odds
 python strike.py value-bets
 ```
 
+Run ROI backtest + calibration plots:
+
+```powershell
+python strike.py backtest
+```
+
 ## Data layout
 
 - `data/raw/`: Cricsheet match CSVs + `_info.csv` files

@@ -89,6 +89,24 @@ def _pick_best_match(pre: pd.DataFrame, ta: str, tb: str) -> pd.Series | None:
     return m.sort_values("start_date").iloc[-1]
 
 
+def _pick_match_by_time(pre: pd.DataFrame, ta: str, tb: str, market_dt: pd.Timestamp | None) -> pd.Series | None:
+    m = pre[
+        (
+            ((pre["team1_std"] == ta) & (pre["team2_std"] == tb))
+            | ((pre["team1_std"] == tb) & (pre["team2_std"] == ta))
+        )
+    ].copy()
+    if m.empty:
+        return None
+    if market_dt is None or pd.isna(market_dt):
+        return m.sort_values("start_date").iloc[-1]
+    # Choose closest match date to the market end time (usually match start/end day).
+    # Ensure both sides are tz-aware (UTC) to avoid pandas tz mismatch errors.
+    start_dt = pd.to_datetime(m["start_date"], utc=True, errors="coerce")
+    m["dt_diff"] = (start_dt - market_dt).abs()
+    return m.sort_values("dt_diff").iloc[0]
+
+
 def load_model(path: Path = MODEL_PATH):
     if joblib is None:
         raise RuntimeError("joblib not available; cannot load model.")
@@ -147,7 +165,16 @@ def build_value_table(odds: pd.DataFrame, pre: pd.DataFrame, model) -> pd.DataFr
         if not ta or not tb or ta == tb:
             continue
 
-        best = _pick_best_match(pre, ta, tb)
+        # Use the market timestamp to map to the correct match (not "latest historical matchup")
+        market_dt = None
+        for c in ["end_date", "event_start_time", "game_start_time"]:
+            v = m.get(c)
+            if isinstance(v, str) and v:
+                market_dt = pd.to_datetime(v, utc=True, errors="coerce")
+                if market_dt is not None and not pd.isna(market_dt):
+                    break
+
+        best = _pick_match_by_time(pre, ta, tb, market_dt)
         if best is None:
             continue
 

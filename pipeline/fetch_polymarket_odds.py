@@ -3,7 +3,7 @@ import asyncio
 import aiohttp
 import pandas as pd
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import re
@@ -13,9 +13,14 @@ from config import PROCESSED_DIR
 
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
 
-async def fetch_all_markets():
+async def fetch_all_markets(active: bool = True, limit: int = 500):
     url = f"{GAMMA_API_URL}/markets"
-    params = {"limit": 500, "active": "true", "order": "volume", "ascending": "false"}
+    params = {
+        "limit": int(limit),
+        "active": "true" if active else "false",
+        "order": "volume",
+        "ascending": "false",
+    }
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as resp:
             if resp.status == 200:
@@ -41,7 +46,7 @@ def extract_teams_from_question(question: str):
 
 async def fetch_polymarket_data():
     print("🚀 Starting Polymarket IPL fetch...")
-    all_markets = await fetch_all_markets()
+    all_markets = await fetch_all_markets(active=True, limit=500)
     if not all_markets:
         return
 
@@ -57,12 +62,28 @@ async def fetch_polymarket_data():
             continue
 
         outcome_prices_str = market.get('outcomePrices', '["0.5","0.5"]')
+        outcomes_str = market.get("outcomes", '["A","B"]')
         try:
             prices = json.loads(outcome_prices_str)
             prob_a = float(prices[0]) if len(prices) > 0 else 0.5
             prob_b = float(prices[1]) if len(prices) > 1 else 0.5
         except:
             prob_a = prob_b = 0.5
+
+        try:
+            outcomes = json.loads(outcomes_str)
+            outcome_a = outcomes[0] if len(outcomes) > 0 else ""
+            outcome_b = outcomes[1] if len(outcomes) > 1 else ""
+        except Exception:
+            outcome_a = outcome_b = ""
+
+        # Prefer market-level game start time/end date if present
+        end_date = market.get("endDate") or market.get("endDateIso") or ""
+        game_start_time = market.get("gameStartTime") or ""
+        event_start_time = ""
+        events = market.get("events") or []
+        if isinstance(events, list) and len(events) > 0 and isinstance(events[0], dict):
+            event_start_time = events[0].get("startTime") or events[0].get("endDate") or ""
 
         processed.append({
             'market_id': market.get('id'),
@@ -72,8 +93,15 @@ async def fetch_polymarket_data():
             'team_b': team_b,
             'prob_a_wins': prob_a,
             'prob_b_wins': prob_b,
+            "outcome_a": outcome_a,
+            "outcome_b": outcome_b,
             'volume': float(market.get('volume', 0)),
-            'fetch_timestamp': datetime.now().isoformat(),
+            "active": bool(market.get("active", True)),
+            "closed": bool(market.get("closed", False)),
+            "end_date": end_date,
+            "game_start_time": game_start_time,
+            "event_start_time": event_start_time,
+            'fetch_timestamp': datetime.now(timezone.utc).isoformat(),
         })
 
     if not processed:

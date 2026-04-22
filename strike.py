@@ -58,6 +58,10 @@ def cmd_value_bets(_: argparse.Namespace) -> None:
     _run(str(ROOT / "pipeline" / "value_bets.py"))
 
 
+def cmd_backtest(_: argparse.Namespace) -> None:
+    _run(str(ROOT / "models" / "backtest.py"))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="strike",
@@ -93,6 +97,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("value-bets", help="Merge model probs with Polymarket odds and rank edges.")
     s.set_defaults(func=cmd_value_bets)
+
+    s = sub.add_parser("backtest", help="Run ROI backtest + calibration plots (synthetic book).")
+    s.set_defaults(func=cmd_backtest)
 
     return p
 
