@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("download","build-master","match-features","pre-match","train-honest","train-match","all")]
+  [ValidateSet("download","build-master","match-features","pre-match","player-features","train-honest","train-match","all")]
   [string]$Step = "all"
 )
 
@@ -23,12 +23,14 @@ switch ($Step) {
   "build-master"  { python pipeline\processor.py; break }
   "match-features"{ python pipeline\match_features.py; break }
   "pre-match"     { python pipeline\pre_matches_features.py; break }
+  "player-features" { python -m pipeline.player_features; break }
   "train-honest"  { python models\honest_predictor.py; break }
   "train-match"   { python models\match_predictor.py; break }
   "all" {
     python pipeline\processor.py
     python pipeline\match_features.py
     python pipeline\pre_matches_features.py
+    python -m pipeline.player_features
     python models\honest_predictor.py
     break
   }

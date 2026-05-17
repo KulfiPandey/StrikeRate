@@ -153,7 +153,7 @@ def main():
     
     out_path = Path(PROCESSED_DIR) / "pre_match_with_matchups.csv"
     pre_enhanced.to_csv(out_path, index=False)
-    print(f"✅ Saved to {out_path}")
+    print(f"Saved to {out_path}")
     print("New columns added:", [c for c in pre_enhanced.columns if c not in pre.columns])
     sample_cols = ["team1", "team2", "team1_partnership_sr", "team1_economy_vs_team2", "team1_strike_rate_vs_team2"]
     print("\nSample (first 5 rows):")

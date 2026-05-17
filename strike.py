@@ -32,13 +32,27 @@ def _run(module_or_path: str, args: list[str] | None = None) -> None:
     subprocess.check_call(cmd, cwd=str(ROOT))
 
 
+def _run_module(module: str) -> None:
+    cmd = [_preferred_python(), "-m", module]
+    print(f"\n$ {' '.join(cmd)}")
+    subprocess.check_call(cmd, cwd=str(ROOT))
+
+
 def cmd_pipeline(_: argparse.Namespace) -> None:
     _run(str(ROOT / "pipeline" / "processor.py"))
     _run(str(ROOT / "pipeline" / "match_features.py"))
     _run(str(ROOT / "pipeline" / "pre_matches_features.py"))
+    _run_module("pipeline.player_features")
+
+
+def cmd_player_features(_: argparse.Namespace) -> None:
+    _run_module("pipeline.player_features")
 
 
 def cmd_train_honest(_: argparse.Namespace) -> None:
+    player_csv = ROOT / "data" / "processed" / "pre_match_with_player_quality.csv"
+    if not player_csv.exists():
+        _run_module("pipeline.player_features")
     _run(str(ROOT / "models" / "honest_predictor.py"))
 
 
@@ -85,8 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(required=True)
 
-    s = sub.add_parser("pipeline", help="Build processed datasets (master/match/pre-match).")
+    s = sub.add_parser("pipeline", help="Build processed datasets (master/match/pre-match/player).")
     s.set_defaults(func=cmd_pipeline)
+
+    s = sub.add_parser("player-features", help="Build rolling player-quality pre-match features.")
+    s.set_defaults(func=cmd_player_features)
 
     s = sub.add_parser("train-honest", help="Train/evaluate the honest pre-match model.")
     s.set_defaults(func=cmd_train_honest)
