@@ -1,6 +1,6 @@
 # StrikeRate
 
-IPL match prediction + feature pipeline (Cricsheet + optional ESPN/Polymarket enrichment).
+IPL analytics: calibrated pre-match probabilities vs Polymarket — find where the market disagrees with historical signals.
 
 ## Quickstart (Windows / PowerShell)
 
@@ -38,12 +38,17 @@ Train the calibrated pre-match model (recommended for odds work):
 python strike.py train-prematch
 ```
 
-Fetch odds + generate value-bets table:
+**Golden path — market edge scanner:**
 
 ```powershell
-python strike.py fetch-odds
-python strike.py value-bets
+python strike.py train-prematch   # once: calibrated pre_match_model.joblib
+python strike_scan.py             # fetch odds -> score -> rank edges -> log
+# or: python strike.py scan
 ```
+
+Optional flags: `--min-edge 0.08`, `--no-fetch` (use cached odds), `--no-log`.
+
+Outputs: `data/processed/value_bets.csv`, `data/processed/edge_log/edges.csv` (append-only forward log).
 
 Run ROI backtest + calibration plots:
 

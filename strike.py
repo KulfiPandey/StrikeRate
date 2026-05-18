@@ -84,8 +84,21 @@ def cmd_x_features(_: argparse.Namespace) -> None:
     _run(str(ROOT / "pipeline" / "social_features.py"))
 
 
+def cmd_scan(ns: argparse.Namespace) -> None:
+    args: list[str] = []
+    if getattr(ns, "min_edge", None) is not None:
+        args.extend(["--min-edge", str(ns.min_edge)])
+    if getattr(ns, "no_fetch", False):
+        args.append("--no-fetch")
+    if getattr(ns, "no_log", False):
+        args.append("--no-log")
+    if getattr(ns, "no_train", False):
+        args.append("--no-train")
+    _run(str(ROOT / "strike_scan.py"), args)
+
+
 def cmd_value_bets(_: argparse.Namespace) -> None:
-    _run(str(ROOT / "pipeline" / "value_bets.py"))
+    _run(str(ROOT / "strike_scan.py"), ["--no-fetch", "--min-edge", "0"])
 
 
 def cmd_backtest(_: argparse.Namespace) -> None:
@@ -128,7 +141,17 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("x-features", help="Build X buzz features and merge into pre-match dataset.")
     s.set_defaults(func=cmd_x_features)
 
-    s = sub.add_parser("value-bets", help="Merge model probs with Polymarket odds and rank edges.")
+    s = sub.add_parser(
+        "scan",
+        help="Golden path: fetch Polymarket odds, score edges vs calibrated pre-match model.",
+    )
+    s.add_argument("--min-edge", type=float, default=0.05, help="Min |edge| to show (default 0.05).")
+    s.add_argument("--no-fetch", action="store_true", help="Use cached polymarket_match_odds.csv.")
+    s.add_argument("--no-log", action="store_true", help="Skip edge_log/edges.csv append.")
+    s.add_argument("--no-train", action="store_true", help="Do not auto-train model if missing.")
+    s.set_defaults(func=cmd_scan)
+
+    s = sub.add_parser("value-bets", help="Alias for scan with --no-fetch (all markets).")
     s.set_defaults(func=cmd_value_bets)
 
     s = sub.add_parser("backtest", help="Run ROI backtest + calibration plots (synthetic book).")
