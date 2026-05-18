@@ -25,9 +25,9 @@ async def fetch_all_markets(active: bool = True, limit: int = 500):
         async with session.get(url, params=params) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                print(f"✅ Fetched {len(data)} markets.")
+                print(f"Fetched {len(data)} markets.")
                 return data
-            print(f"❌ API Error: {resp.status}")
+            print(f"API Error: {resp.status}")
             return []
 
 def extract_teams_from_question(question: str):
@@ -45,7 +45,7 @@ def extract_teams_from_question(question: str):
     return None, None
 
 async def fetch_polymarket_data():
-    print("🚀 Starting Polymarket IPL fetch...")
+    print("Starting Polymarket IPL fetch...")
     all_markets = await fetch_all_markets(active=True, limit=500)
     if not all_markets:
         return
@@ -112,8 +112,8 @@ async def fetch_polymarket_data():
     output_path = Path(PROCESSED_DIR) / "polymarket_match_odds.csv"
     df.to_csv(output_path, index=False)
 
-    print(f"💾 Saved {len(df)} IPL match markets to {output_path}")
-    print("\n📊 Sample:")
+    print(f"Saved {len(df)} IPL match markets to {output_path}")
+    print("\nSample:")
     print(df[['question', 'team_a', 'team_b', 'prob_a_wins', 'prob_b_wins']].head())
 
 if __name__ == "__main__":

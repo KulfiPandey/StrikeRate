@@ -1,0 +1,17 @@
+[
+  "team1_elo",
+  "team2_elo",
+  "elo_diff",
+  "team1_form",
+  "team2_form",
+  "form_diff",
+  "head_to_head",
+  "venue_t1_wr",
+  "venue_bat_first_wr",
+  "toss_is_team1",
+  "toss_decision_enc",
+  "team1_batting_quality",
+  "team2_batting_quality",
+  "team1_bowling_quality",
+  "team2_bowling_quality"
+]

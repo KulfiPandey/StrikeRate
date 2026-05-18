@@ -27,20 +27,19 @@ except Exception:
 
 ROOT = Path(__file__).parent.parent
 ODDS_PATH = Path(PROCESSED_DIR) / "polymarket_match_odds.csv"
-DATA_PATH = Path(PROCESSED_DIR) / "pre_match_clean.csv"
-MODEL_PATH = Path(PROCESSED_DIR) / "models" / "pre_match_model.joblib"
-WALKFORWARD_PATH = Path(PROCESSED_DIR) / "models" / "pre_match_walkforward_predictions.csv"
+DATA_PATH = Path(PROCESSED_DIR) / "pre_match_with_player_quality.csv"
+MODEL_PATH = ROOT / "models" / "honest_model.joblib"
 LOG_DIR = Path(PROCESSED_DIR) / "edge_log"
 LOG_PATH = LOG_DIR / "edges.csv"
 
-# Must match models/pre_match_model.py
+# Must match models/honest_predictor.py
 FEATURE_COLS = [
-    "team1", "team2", "venue",
     "team1_elo", "team2_elo", "elo_diff",
     "team1_form", "team2_form", "form_diff",
-    "team1_bat_sr", "team2_bat_sr", "sr_diff",
-    "head_to_head", "venue_bat_first_wr", "venue_t1_wr",
+    "head_to_head", "venue_t1_wr", "venue_bat_first_wr",
     "toss_is_team1", "toss_decision_enc",
+    "team1_batting_quality", "team2_batting_quality",
+    "team1_bowling_quality", "team2_bowling_quality",
 ]
 
 
@@ -76,21 +75,14 @@ def load_pre_match(path: Path = DATA_PATH) -> pd.DataFrame:
 
 
 def ensure_calibrated_model() -> Any:
-    """Train and save pre_match_model.joblib if missing."""
+    """Load honest_model.joblib (train with models.honest_predictor if missing)."""
     if MODEL_PATH.exists() and joblib is not None:
         return joblib.load(MODEL_PATH)
     if joblib is None:
         raise RuntimeError("joblib required. pip install joblib")
-
-    from models.pre_match_model import load_data, save_artifacts, train_final, walk_forward_eval
-
-    print("Calibrated pre-match model not found — training...")
-    df = load_data()
-    preds, metrics = walk_forward_eval(df)
-    model = train_final(df)
-    save_artifacts(model, preds, metrics)
-    print(f"Saved: {MODEL_PATH}")
-    return model
+    raise FileNotFoundError(
+        f"Missing {MODEL_PATH}. Run: python -m models.honest_predictor"
+    )
 
 
 def load_calibrated_model() -> Any:
@@ -102,13 +94,7 @@ def load_calibrated_model() -> Any:
 
 
 def model_prob_team1_win(model, row: pd.Series) -> float:
-    payload = {}
-    for c in FEATURE_COLS:
-        v = row.get(c)
-        if c in ("team1", "team2", "venue"):
-            payload[c] = "UNKNOWN" if v is None or (isinstance(v, float) and np.isnan(v)) else str(v)
-        else:
-            payload[c] = pd.to_numeric(v, errors="coerce")
+    payload = {c: pd.to_numeric(row.get(c), errors="coerce") for c in FEATURE_COLS}
     X = pd.DataFrame([payload])
     p = float(model.predict_proba(X)[:, 1][0])
     return float(np.clip(p, 1e-6, 1 - 1e-6))
@@ -229,7 +215,7 @@ def format_scan_table(df: pd.DataFrame, min_edge: float) -> str:
     w = 52
     lines = [
         "=" * w,
-        " StrikeRate — Market Edge Scanner",
+        " StrikeRate - Market Edge Scanner",
         "=" * w,
         f" {'MATCH':<14} {'MODEL':>7} {'MARKET':>7} {'EDGE':>7}  SIGNAL",
         "-" * w,
@@ -283,7 +269,7 @@ def run_scan(
     scan_ts = datetime.now(timezone.utc).isoformat()
     print(format_scan_table(table, min_edge))
     print(f"\nMarkets scanned: {len(odds)}  |  Edges flagged: {len(table)}")
-    print(f"Signal source: {MODEL_PATH.name} (calibrated pre-match)")
+    print(f"Signal source: {MODEL_PATH.name} (honest pre-match)")
 
     if save_csv and len(table):
         out = Path(PROCESSED_DIR) / "value_bets.csv"

@@ -32,15 +32,26 @@ def _run(module_or_path: str, args: list[str] | None = None) -> None:
     subprocess.check_call(cmd, cwd=str(ROOT))
 
 
-def _run_module(module: str) -> None:
-    cmd = [_preferred_python(), "-m", module]
+def _run_module(module: str, args: list[str] | None = None) -> None:
+    args = args or []
+    cmd = [_preferred_python(), "-m", module, *args]
     print(f"\n$ {' '.join(cmd)}")
     subprocess.check_call(cmd, cwd=str(ROOT))
 
 
+def cmd_ingest_cricsheet(ns: argparse.Namespace) -> None:
+    args = []
+    if getattr(ns, "download", False):
+        args.append("--download")
+    if getattr(ns, "no_compat", False):
+        args.append("--no-compat")
+    _run_module("pipeline.ingest_cricsheet", args)
+
+
 def cmd_pipeline(_: argparse.Namespace) -> None:
-    _run(str(ROOT / "pipeline" / "processor.py"))
-    _run(str(ROOT / "pipeline" / "match_features.py"))
+    parquet = ROOT / "data" / "processed" / "matches.parquet"
+    if not parquet.exists():
+        _run_module("pipeline.ingest_cricsheet", ["--download"])
     _run(str(ROOT / "pipeline" / "pre_matches_features.py"))
     _run_module("pipeline.player_features")
 
@@ -112,7 +123,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(required=True)
 
-    s = sub.add_parser("pipeline", help="Build processed datasets (master/match/pre-match/player).")
+    s = sub.add_parser(
+        "ingest-cricsheet",
+        help="Download Cricsheet IPL JSON and build matches/deliveries Parquet.",
+    )
+    s.add_argument("--download", action="store_true", help="Fetch ipl_json.zip from Cricsheet.")
+    s.add_argument("--no-compat", action="store_true", help="Skip legacy deliveries.csv / matches.csv.")
+    s.set_defaults(func=cmd_ingest_cricsheet)
+
+    s = sub.add_parser(
+        "pipeline",
+        help="Ingest Cricsheet (if needed), pre-match features, player quality.",
+    )
     s.set_defaults(func=cmd_pipeline)
 
     s = sub.add_parser("player-features", help="Build rolling player-quality pre-match features.")

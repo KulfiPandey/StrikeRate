@@ -1,249 +1,324 @@
-import pandas as pd
-import numpy as np
+from __future__ import annotations
+
+import ast
+import re
+from collections import defaultdict, deque
 from pathlib import Path
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-from config import PROCESSED_DIR
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+
+try:
+    from config import PROCESSED_DIR as _PROCESSED_DIR, RAW_DIR as _RAW_DIR
+except Exception:
+    _PROCESSED_DIR = ROOT / "data" / "processed"
+    _RAW_DIR = ROOT / "data" / "raw"
+
+PROCESSED_DIR = Path(_PROCESSED_DIR)
+RAW_DIR = Path(_RAW_DIR)
+PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+OUT_PATH = PROCESSED_DIR / "pre_match_clean.csv"
+
+K_ELO = 20.0
+FORM_WINDOW = 5
 
 
-def load_base():
-    master = pd.read_csv(Path(PROCESSED_DIR) / "master_deliveries.csv", low_memory=False)
-    matches = pd.read_csv(Path(PROCESSED_DIR) / "match_features.csv")
-
-    matches["start_date"] = pd.to_datetime(matches["start_date"])
-    matches["season"] = matches["season"].astype(str).str[:4].astype(int)
-
-    return master, matches
+def norm_text(x: Any) -> str:
+    if x is None or (isinstance(x, float) and np.isnan(x)) or pd.isna(x):
+        return ""
+    return str(x).strip()
 
 
-def build_team_results(master):
-    inn = (
-        master.groupby(["match_id", "innings"])
-        .agg(
-            batting_team=("batting_team", "first"),
-            runs=("runs_off_bat", "sum"),
-            balls=("ball", "count"),
-            start_date=("start_date", "first"),
-        )
-        .reset_index()
-    )
+def norm_lower(x: Any) -> str:
+    return norm_text(x).lower()
 
-    inn["start_date"] = pd.to_datetime(inn["start_date"])
 
-    records = []
-    for mid, grp in inn.groupby("match_id"):
-        i1 = grp[grp["innings"] == 1]
-        i2 = grp[grp["innings"] == 2]
+def season_to_int(value: Any):
+    text = norm_text(value)
+    if not text:
+        return pd.NA
+    m = re.search(r"\d{4}", text)
+    return int(m.group()) if m else pd.NA
 
-        if i1.empty or i2.empty:
+
+def parse_teams(row: dict[str, Any]) -> tuple[str | None, str | None]:
+    for a, b in (("team1", "team2"), ("team_1", "team_2"), ("home_team", "away_team")):
+        if a in row and b in row:
+            t1, t2 = row.get(a), row.get(b)
+            if pd.notna(t1) and pd.notna(t2):
+                return norm_text(t1), norm_text(t2)
+
+    teams = row.get("teams")
+    if teams is None or pd.isna(teams):
+        return None, None
+
+    text = norm_text(teams)
+    if not text:
+        return None, None
+
+    try:
+        if text.startswith("[") or text.startswith("("):
+            parsed = ast.literal_eval(text)
+            if isinstance(parsed, (list, tuple)) and len(parsed) >= 2:
+                return norm_text(parsed[0]), norm_text(parsed[1])
+    except Exception:
+        pass
+
+    for sep in ("|", ";", "/", ","):
+        if sep in text:
+            parts = [p.strip().strip("'\"") for p in text.split(sep) if p.strip()]
+            if len(parts) >= 2:
+                return parts[0], parts[1]
+
+    return None, None
+
+
+def result_is_valid(winner: Any) -> bool:
+    w = norm_lower(winner)
+    return w not in {"", "nan", "none", "draw", "no result", "tie", "abandoned", "cancelled"}
+
+
+def team1_bats_first(toss_winner: Any, toss_decision: Any, team1: Any) -> float:
+    tw, td, t1 = norm_lower(toss_winner), norm_lower(toss_decision), norm_lower(team1)
+    if not tw or not td or not t1:
+        return np.nan
+
+    if td == "bat":
+        return 1.0 if tw == t1 else 0.0
+    if td == "field":
+        return 0.0 if tw == t1 else 1.0
+    return np.nan
+
+
+def safe_mean(values, default=0.5) -> float:
+    clean = [v for v in values if v is not None and not pd.isna(v)]
+    return float(np.mean(clean)) if clean else default
+
+
+def load_metadata_from_parquet() -> pd.DataFrame | None:
+    parquet_path = PROCESSED_DIR / "matches.parquet"
+    if not parquet_path.exists():
+        return None
+
+    df = pd.read_parquet(parquet_path)
+    needed = ["match_id", "team1", "team2"]
+    if not all(c in df.columns for c in needed):
+        return None
+
+    out = df.copy()
+    if "winner" not in out.columns and "match_winner" in out.columns:
+        out["winner"] = out["match_winner"]
+    if "start_date" not in out.columns and "date" in out.columns:
+        out["start_date"] = out["date"]
+
+    cols = [
+        c
+        for c in [
+            "match_id",
+            "season",
+            "start_date",
+            "venue",
+            "city",
+            "team1",
+            "team2",
+            "winner",
+            "toss_winner",
+            "toss_decision",
+        ]
+        if c in out.columns
+    ]
+    out = out[cols].drop_duplicates("match_id")
+    out["start_date"] = pd.to_datetime(out["start_date"], errors="coerce")
+    out["season"] = out["season"].map(season_to_int)
+    return out
+
+
+def load_metadata() -> pd.DataFrame:
+    from_parquet = load_metadata_from_parquet()
+    if from_parquet is not None and len(from_parquet):
+        return from_parquet
+
+    rows: list[dict[str, Any]] = []
+
+    for fp in sorted(RAW_DIR.glob("*_info.csv")):
+        try:
+            raw = pd.read_csv(fp, low_memory=False, nrows=1)
+        except Exception:
             continue
 
-        r1, r2 = i1["runs"].iloc[0], i2["runs"].iloc[0]
-        t1, t2 = i1["batting_team"].iloc[0], i2["batting_team"].iloc[0]
-        b1, b2 = i1["balls"].iloc[0], i2["balls"].iloc[0]
-        date = i1["start_date"].iloc[0]
+        if raw.empty:
+            continue
 
-        winner = t1 if r1 > r2 else t2
+        row = raw.iloc[0].to_dict()
+        row["match_id"] = norm_text(Path(fp).stem.replace("_info", ""))
 
-        for team, runs, balls, won in [
-            (t1, r1, b1, winner == t1),
-            (t2, r2, b2, winner == t2),
-        ]:
-            records.append({
-                "match_id": mid,
-                "start_date": date,
-                "team": team,
-                "runs": runs,
-                "balls": balls,
-                "did_win": int(won),
-                "batting_first": int(team == t1),
-            })
+        team1, team2 = parse_teams(row)
+        if not team1 or not team2:
+            continue
 
-    df = pd.DataFrame(records)
-    df["sr"] = np.where(df["balls"] > 0, (df["runs"] / df["balls"]) * 100, np.nan)
+        row["team1"] = team1
+        row["team2"] = team2
+        row["season"] = season_to_int(row.get("season"))
+        row["start_date"] = row.get("date", row.get("start_date"))
+        rows.append(row)
 
-    return df.sort_values("start_date").reset_index(drop=True)
+    if rows:
+        out = pd.DataFrame(rows)
+        out["start_date"] = pd.to_datetime(out["start_date"], errors="coerce")
+        out["season"] = out["season"].map(season_to_int)
+        return out
 
+    # Fallback only if raw info files are not available.
+    fallback = PROCESSED_DIR / "match_features.csv"
+    if fallback.exists():
+        df = pd.read_csv(fallback, low_memory=False)
+        needed = [c for c in ["match_id", "season", "start_date", "venue", "team1", "team2", "winner", "toss_winner", "toss_decision"] if c in df.columns]
+        if needed:
+            out = df.drop_duplicates("match_id")[needed].copy()
+            out["season"] = out["season"].map(season_to_int)
+            out["start_date"] = pd.to_datetime(out["start_date"], errors="coerce")
+            return out
 
-def compute_elo(matches, k=20):
-    matches = matches.sort_values("start_date").reset_index(drop=True)
-
-    elo = {}
-    t1_elo, t2_elo = [], []
-
-    for _, row in matches.iterrows():
-        t1, t2 = row["team1"], row["team2"]
-
-        e1 = elo.get(t1, 1500)
-        e2 = elo.get(t2, 1500)
-
-        t1_elo.append(e1)
-        t2_elo.append(e2)
-
-        exp1 = 1 / (1 + 10 ** ((e2 - e1) / 400))
-        res1 = row["team1_won"]
-
-        elo[t1] = e1 + k * (res1 - exp1)
-        elo[t2] = e2 + k * ((1 - res1) - (1 - exp1))
-
-    matches["team1_elo"] = t1_elo
-    matches["team2_elo"] = t2_elo
-
-    return matches
+    raise FileNotFoundError("No raw *_info.csv files found and no fallback match_features.csv available.")
 
 
-def add_rolling_form(matches, team_results, n=5):
-    matches = matches.sort_values("start_date").reset_index(drop=True)
+def build_pre_match_features(meta: pd.DataFrame) -> pd.DataFrame:
+    meta = meta.copy()
+    meta = meta.sort_values(["start_date", "match_id"], kind="stable").reset_index(drop=True)
 
-    t1_wr, t2_wr, t1_sr, t2_sr = [], [], [], []
+    elo = defaultdict(lambda: 1500.0)
+    recent_results = defaultdict(lambda: deque(maxlen=FORM_WINDOW))
+    h2h_results = defaultdict(list)
+    venue_team_results = defaultdict(list)
+    venue_bat_first_results = defaultdict(list)
 
-    for _, row in matches.iterrows():
-        date = row["start_date"]
+    records: list[dict[str, Any]] = []
 
-        for team, wr_list, sr_list in [
-            (row["team1"], t1_wr, t1_sr),
-            (row["team2"], t2_wr, t2_sr),
-        ]:
-            past = team_results[
-                (team_results["team"] == team) &
-                (team_results["start_date"] < date)
-            ].tail(n)
+    for row in meta.itertuples(index=False):
+        d = row._asdict()
 
-            if len(past) > 0:
-                wr_list.append(past["did_win"].mean())
-                sr_list.append((past["runs"].sum() / past["balls"].sum()) * 100)
-            else:
-                wr_list.append(0.5)
-                sr_list.append(120.0)
+        match_id = norm_text(d.get("match_id"))
+        team1 = norm_text(d.get("team1"))
+        team2 = norm_text(d.get("team2"))
+        venue = norm_text(d.get("venue"))
+        winner = d.get("winner")
+        toss_winner = d.get("toss_winner")
+        toss_decision = d.get("toss_decision")
 
-    matches["team1_form"] = t1_wr
-    matches["team2_form"] = t2_wr
-    matches["team1_bat_sr"] = t1_sr
-    matches["team2_bat_sr"] = t2_sr
+        t1_elo = float(elo[team1])
+        t2_elo = float(elo[team2])
+        t1_form = safe_mean(recent_results[team1], default=0.5)
+        t2_form = safe_mean(recent_results[team2], default=0.5)
+        h2h_key = (team1, team2)
+        venue_team_key = (venue, team1)
 
-    return matches
+        head_to_head = safe_mean(h2h_results[h2h_key], default=0.5)
+        venue_t1_wr = safe_mean(venue_team_results[venue_team_key], default=0.5)
+        venue_bat_first_wr = safe_mean(venue_bat_first_results[venue], default=0.5)
 
+        toss_is_team1 = np.nan
+        if norm_text(toss_winner):
+            toss_is_team1 = int(norm_lower(toss_winner) == norm_lower(team1))
 
-def add_head_to_head(matches, team_results, n=5):
-    matches = matches.sort_values("start_date").reset_index(drop=True)
+        toss_decision_enc = -1
+        td = norm_lower(toss_decision)
+        if td == "bat":
+            toss_decision_enc = 1
+        elif td == "field":
+            toss_decision_enc = 0
 
-    match_teams = team_results.groupby("match_id")["team"].apply(set).to_dict()
+        valid_result = result_is_valid(winner)
+        team1_won = np.nan
+        if valid_result and norm_text(winner) and team1:
+            team1_won = int(norm_lower(winner) == norm_lower(team1))
 
-    pair_map = {}
-    for mid, teams in match_teams.items():
-        key = tuple(sorted(teams))
-        pair_map.setdefault(key, []).append(mid)
+        record = {
+            "match_id": match_id,
+            "season": season_to_int(d.get("season")),
+            "start_date": pd.to_datetime(d.get("start_date"), errors="coerce"),
+            "venue": venue,
+            "team1": team1,
+            "team2": team2,
+            "winner": norm_text(winner),
+            "toss_winner": norm_text(toss_winner),
+            "toss_decision": norm_text(toss_decision),
+            "toss_is_team1": toss_is_team1,
+            "toss_decision_enc": toss_decision_enc,
+            "team1_elo": t1_elo,
+            "team2_elo": t2_elo,
+            "elo_diff": t1_elo - t2_elo,
+            "team1_form": t1_form,
+            "team2_form": t2_form,
+            "form_diff": t1_form - t2_form,
+            "head_to_head": head_to_head,
+            "venue_t1_wr": venue_t1_wr,
+            "venue_bat_first_wr": venue_bat_first_wr,
+            "team1_won": team1_won,
+        }
+        records.append(record)
 
-    h2h = []
+        if not valid_result:
+            continue
 
-    for _, row in matches.iterrows():
-        date = row["start_date"]
-        t1, t2 = row["team1"], row["team2"]
+        outcome = int(team1_won)
 
-        past_ids = pair_map.get(tuple(sorted([t1, t2])), [])
+        # Update rolling results after the match.
+        recent_results[team1].append(outcome)
+        recent_results[team2].append(1 - outcome)
+        h2h_results[h2h_key].append(outcome)
+        venue_team_results[venue_team_key].append(outcome)
+        venue_team_results[(venue, team2)].append(1 - outcome)
 
-        past = team_results[
-            (team_results["match_id"].isin(past_ids)) &
-            (team_results["start_date"] < date) &
-            (team_results["team"] == t1)
-        ].tail(n)
+        t1_bf = team1_bats_first(toss_winner, toss_decision, team1)
+        if not pd.isna(t1_bf):
+            batting_first_win = outcome if int(t1_bf) == 1 else (1 - outcome)
+            venue_bat_first_results[venue].append(batting_first_win)
 
-        h2h.append(past["did_win"].mean() if len(past) > 0 else 0.5)
+        # ELO update
+        exp1 = 1.0 / (1.0 + 10.0 ** ((t2_elo - t1_elo) / 400.0))
+        elo[team1] = t1_elo + K_ELO * (outcome - exp1)
+        elo[team2] = t2_elo + K_ELO * ((1 - outcome) - (1 - exp1))
 
-    matches["head_to_head"] = h2h
+    out = pd.DataFrame(records)
+    out["season"] = out["season"].map(season_to_int).astype("Int64")
+    out["start_date"] = pd.to_datetime(out["start_date"], errors="coerce")
 
-    return matches
-
-
-def add_venue_features(matches, team_results):
-    matches = matches.sort_values("start_date").reset_index(drop=True)
-
-    venue_map = matches.set_index("match_id")["venue"].to_dict()
-    team_results = team_results.copy()
-    team_results["venue"] = team_results["match_id"].map(venue_map)
-
-    venue_bf_wr, venue_t1_wr = [], []
-
-    for _, row in matches.iterrows():
-        date, venue = row["start_date"], row["venue"]
-        t1 = row["team1"]
-
-        past = team_results[
-            (team_results["venue"] == venue) &
-            (team_results["start_date"] < date)
-        ]
-
-        bf = past[past["batting_first"] == 1]
-        venue_bf_wr.append(bf["did_win"].mean() if len(bf) > 0 else 0.5)
-
-        t1_v = past[past["team"] == t1]
-        venue_t1_wr.append(t1_v["did_win"].mean() if len(t1_v) > 0 else 0.5)
-
-    matches["venue_bat_first_wr"] = venue_bf_wr
-    matches["venue_t1_wr"] = venue_t1_wr
-
-    return matches
-
-
-def add_toss(matches):
-    """
-    Toss info is already in match_features.csv (from _info files).
-    We just encode it.
-    """
-    if "toss_winner" not in matches.columns or "toss_decision" not in matches.columns:
-        raise ValueError("toss_winner or toss_decision missing from match_features.csv")
-
-    matches["toss_is_team1"] = (matches["toss_winner"] == matches["team1"]).astype(int)
-    matches["toss_decision_enc"] = matches["toss_decision"].map({"bat": 0, "field": 1}).fillna(0).astype(int)
-
-    return matches
-
-
-def build_dataset():
-    print("Loading...")
-    master, matches = load_base()
-
-    print("Building team results...")
-    team_results = build_team_results(master)
-
-    print("Computing ELO...")
-    matches = compute_elo(matches)
-
-    print("Adding rolling form...")
-    matches = add_rolling_form(matches, team_results)
-
-    print("Adding head-to-head...")
-    matches = add_head_to_head(matches, team_results)
-
-    print("Adding venue features...")
-    matches = add_venue_features(matches, team_results)
-
-    print("Adding toss...")
-    matches = add_toss(matches)
-
-    matches["elo_diff"] = matches["team1_elo"] - matches["team2_elo"]
-    matches["form_diff"] = matches["team1_form"] - matches["team2_form"]
-    matches["sr_diff"] = matches["team1_bat_sr"] - matches["team2_bat_sr"]
-
-    out = matches[[
-        "match_id", "season", "start_date", "team1", "team2", "venue",
-        "team1_won",
-        "team1_elo", "team2_elo", "elo_diff",
-        "team1_form", "team2_form", "form_diff",
-        "team1_bat_sr", "team2_bat_sr", "sr_diff",
+    numeric_cols = [
+        "toss_is_team1",
+        "toss_decision_enc",
+        "team1_elo",
+        "team2_elo",
+        "elo_diff",
+        "team1_form",
+        "team2_form",
+        "form_diff",
         "head_to_head",
-        "venue_bat_first_wr", "venue_t1_wr",
-        "toss_is_team1", "toss_decision_enc"
-    ]]
+        "venue_t1_wr",
+        "venue_bat_first_wr",
+        "team1_won",
+    ]
+    for col in numeric_cols:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
 
-    out_path = Path(PROCESSED_DIR) / "pre_match_clean.csv"
-    out.to_csv(out_path, index=False)
-    print(f"✅ Saved: {out_path}")
+    out.to_csv(OUT_PATH, index=False)
+    print(f"Saved: {OUT_PATH}")
     print(f"Shape: {out.shape}")
+    print(out.head())
 
     return out
 
 
+def main():
+    print("Loading raw match info...")
+    meta = load_metadata()
+    print(f"Loaded {len(meta)} matches across {meta['season'].nunique()} seasons")
+    build_pre_match_features(meta)
+
+
 if __name__ == "__main__":
-    df = build_dataset()
-    print(df.head())
+    main()
