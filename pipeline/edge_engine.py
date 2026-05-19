@@ -1,293 +1,167 @@
-"""
-Canonical edge pipeline: calibrated pre-match model vs Polymarket implied probs.
-
-Golden path:
-  load odds -> score with pre_match_model.joblib -> edge = p_model - p_market -> log
-"""
 from __future__ import annotations
 
+import argparse
 import json
-import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
+import joblib
 import numpy as np
 import pandas as pd
 
-sys.path.append(str(Path(__file__).parent.parent))
-from config import PROCESSED_DIR
-from pipeline.team_name_standardizer import standardize_team_name
+ROOT = Path(__file__).resolve().parents[1]
 
 try:
-    import joblib  # type: ignore
+    from config import PROCESSED_DIR as _PROCESSED_DIR, MODELS_DIR as _MODELS_DIR
 except Exception:
-    joblib = None
+    _PROCESSED_DIR = ROOT / "data" / "processed"
+    _MODELS_DIR = ROOT / "models"
 
-ROOT = Path(__file__).parent.parent
-ODDS_PATH = Path(PROCESSED_DIR) / "polymarket_match_odds.csv"
-DATA_PATH = Path(PROCESSED_DIR) / "pre_match_with_player_quality.csv"
-MODEL_PATH = ROOT / "models" / "honest_model.joblib"
-LOG_DIR = Path(PROCESSED_DIR) / "edge_log"
-LOG_PATH = LOG_DIR / "edges.csv"
+PROCESSED_DIR = Path(_PROCESSED_DIR)
+MODELS_DIR = Path(_MODELS_DIR)
+PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Must match models/honest_predictor.py
-FEATURE_COLS = [
-    "team1_elo", "team2_elo", "elo_diff",
-    "team1_form", "team2_form", "form_diff",
-    "head_to_head", "venue_t1_wr", "venue_bat_first_wr",
-    "toss_is_team1", "toss_decision_enc",
-    "team1_batting_quality", "team2_batting_quality",
-    "team1_bowling_quality", "team2_bowling_quality",
+MODEL_PATH = MODELS_DIR / "honest_model.joblib"
+FEATURE_PATH = MODELS_DIR / "honest_feature_columns.json"
+DEFAULT_INPUTS = [
+    PROCESSED_DIR / "pre_match_with_player_quality.csv",
+    PROCESSED_DIR / "pre_match_clean.csv",
+    PROCESSED_DIR / "match_features.csv",
 ]
 
-
-def _safe_float(x: Any, default: float = 0.0) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return default
+MARKET_COL_CANDIDATES = ["p_market", "polymarket_prob", "market_prob", "implied_prob"]
 
 
-def load_odds(path: Path = ODDS_PATH) -> pd.DataFrame:
-    if not path.exists():
-        raise FileNotFoundError(f"Missing odds: {path}. Run: python strike.py fetch-odds")
-    df = pd.read_csv(path)
-    for c in ["team_a", "team_b"]:
-        if c in df.columns:
-            df[c] = df[c].astype(str).apply(standardize_team_name)
-    if "volume" in df.columns:
-        df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
-    return df
+def load_input(path: str | None) -> pd.DataFrame:
+    if path:
+        return pd.read_csv(path, low_memory=False)
+
+    for fp in DEFAULT_INPUTS:
+        if fp.exists():
+            return pd.read_csv(fp, low_memory=False)
+
+    raise FileNotFoundError("No input CSV found. Run the pre-match pipeline first.")
 
 
-def load_pre_match(path: Path = DATA_PATH) -> pd.DataFrame:
-    if not path.exists():
-        raise FileNotFoundError(f"Missing dataset: {path}. Run: python strike.py pipeline")
-    df = pd.read_csv(path)
-    df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce")
-    df = df.dropna(subset=["start_date"]).sort_values("start_date").reset_index(drop=True)
-    df["team1_std"] = df["team1"].astype(str).apply(standardize_team_name)
-    df["team2_std"] = df["team2"].astype(str).apply(standardize_team_name)
-    df["match_id"] = df["match_id"].astype(str)
-    return df
-
-
-def ensure_calibrated_model() -> Any:
-    """Load honest_model.joblib (train with models.honest_predictor if missing)."""
-    if MODEL_PATH.exists() and joblib is not None:
-        return joblib.load(MODEL_PATH)
-    if joblib is None:
-        raise RuntimeError("joblib required. pip install joblib")
-    raise FileNotFoundError(
-        f"Missing {MODEL_PATH}. Run: python -m models.honest_predictor"
-    )
-
-
-def load_calibrated_model() -> Any:
-    if joblib is None:
-        raise RuntimeError("joblib required. pip install joblib")
+def load_model_and_columns():
     if not MODEL_PATH.exists():
-        return ensure_calibrated_model()
-    return joblib.load(MODEL_PATH)
+        raise FileNotFoundError(f"Model not found: {MODEL_PATH}. Run `python -m models.honest_predictor` first.")
+    if not FEATURE_PATH.exists():
+        raise FileNotFoundError(f"Feature list not found: {FEATURE_PATH}. Run `python -m models.honest_predictor` first.")
+
+    model = joblib.load(MODEL_PATH)
+    with open(FEATURE_PATH, "r", encoding="utf-8") as f:
+        feature_columns = json.load(f)
+
+    return model, feature_columns
 
 
-def model_prob_team1_win(model, row: pd.Series) -> float:
-    payload = {c: pd.to_numeric(row.get(c), errors="coerce") for c in FEATURE_COLS}
-    X = pd.DataFrame([payload])
-    p = float(model.predict_proba(X)[:, 1][0])
-    return float(np.clip(p, 1e-6, 1 - 1e-6))
+def score_matches(df: pd.DataFrame) -> pd.DataFrame:
+    from models.honest_predictor import build_matrix
+
+    model, feature_columns = load_model_and_columns()
+    X, _, meta, _ = build_matrix(df, fit_columns=feature_columns, require_target=False)
+
+    p_model = model.predict_proba(X)[:, 1]
+    scored = meta.copy()
+    scored["p_model"] = p_model
+
+    # Carry through market probabilities if present.
+    for c in MARKET_COL_CANDIDATES:
+        if c in df.columns:
+            scored[c] = pd.to_numeric(df.loc[scored.index, c], errors="coerce")
+            break
+
+    return scored
 
 
-def _pick_match_by_time(pre: pd.DataFrame, ta: str, tb: str, market_dt: pd.Timestamp | None) -> pd.Series | None:
-    m = pre[
-        (
-            ((pre["team1_std"] == ta) & (pre["team2_std"] == tb))
-            | ((pre["team1_std"] == tb) & (pre["team2_std"] == ta))
-        )
-    ].copy()
-    if m.empty:
-        return None
-    if market_dt is None or pd.isna(market_dt):
-        return m.sort_values("start_date").iloc[-1]
-    start_dt = pd.to_datetime(m["start_date"], utc=True, errors="coerce")
-    m["dt_diff"] = (start_dt - market_dt).abs()
-    return m.sort_values("dt_diff").iloc[0]
-
-
-def _market_timestamp(row: pd.Series) -> pd.Timestamp | None:
-    for c in ["end_date", "event_start_time", "game_start_time"]:
-        v = row.get(c)
-        if isinstance(v, str) and v:
-            dt = pd.to_datetime(v, utc=True, errors="coerce")
-            if dt is not None and not pd.isna(dt):
-                return dt
+def pick_market_col(df: pd.DataFrame) -> str | None:
+    for c in MARKET_COL_CANDIDATES:
+        if c in df.columns:
+            return c
     return None
 
 
-def _signal(team: str, edge: float, min_edge: float) -> str:
-    if edge >= min_edge:
-        return f"VALUE {team}"
-    if edge <= -min_edge:
-        return f"FADE {team}"
-    return "NEUTRAL"
+def build_edges(df: pd.DataFrame, threshold: float = 0.05) -> pd.DataFrame:
+    market_col = pick_market_col(df)
+    out = df.copy()
 
+    if market_col is None:
+        out["edge"] = np.nan
+        out["recommendation"] = "NO MARKET"
+        out["kelly_fraction"] = np.nan
+        return out
 
-def build_edge_table(
-    odds: pd.DataFrame,
-    pre: pd.DataFrame,
-    model,
-    min_edge: float = 0.0,
-) -> pd.DataFrame:
-    rows = []
-    for _, m in odds.iterrows():
-        ta = str(m.get("team_a", ""))
-        tb = str(m.get("team_b", ""))
-        if not ta or not tb or ta == tb:
+    out[market_col] = pd.to_numeric(out[market_col], errors="coerce")
+    out = out[out[market_col].notna()].copy()
+
+    out["edge"] = out["p_model"] - out[market_col]
+    out["abs_edge"] = out["edge"].abs()
+
+    out["recommendation"] = "NO BET"
+    out.loc[out["edge"] >= threshold, "recommendation"] = out.loc[out["edge"] >= threshold, "team1"].map(lambda x: f"VALUE {x}")
+    out.loc[out["edge"] <= -threshold, "recommendation"] = out.loc[out["edge"] <= -threshold, "team2"].map(lambda x: f"VALUE {x}")
+
+    # Simple Kelly on the recommended side using fair odds from the market probability.
+    out["kelly_fraction"] = np.nan
+    for idx, row in out.iterrows():
+        if row["recommendation"] == "NO BET":
             continue
 
-        best = _pick_match_by_time(pre, ta, tb, _market_timestamp(m))
-        if best is None:
-            continue
+        if row["recommendation"].startswith("VALUE ") and row["recommendation"].endswith(str(row.get("team1", ""))):
+            p = float(row["p_model"])
+            market_p = float(row[market_col])
+        else:
+            p = 1.0 - float(row["p_model"])
+            market_p = 1.0 - float(row[market_col])
 
-        p_team1 = model_prob_team1_win(model, best)
-        team1_std = standardize_team_name(best.get("team1"))
-        p_model_a = p_team1 if team1_std == ta else (1.0 - p_team1)
+        market_p = min(max(market_p, 1e-6), 1 - 1e-6)
+        decimal_odds = 1.0 / market_p
+        b = decimal_odds - 1.0
+        q = 1.0 - p
+        kelly = ((b * p) - q) / b if b > 0 else 0.0
+        out.at[idx, "kelly_fraction"] = max(0.0, float(kelly))
 
-        p_market_a = _safe_float(m.get("prob_a_wins"), 0.5)
-        p_market_b = _safe_float(m.get("prob_b_wins"), 0.5)
-        edge_a = p_model_a - p_market_a
-        edge_b = (1.0 - p_model_a) - p_market_b
-
-        rows.append({
-            "market_id": str(m.get("market_id", "")),
-            "question": str(m.get("question", "")),
-            "team_a": ta,
-            "team_b": tb,
-            "match_label": f"{ta} vs {tb}",
-            "mapped_match_id": str(best.get("match_id", "")),
-            "p_model_a": p_model_a,
-            "p_market_a": p_market_a,
-            "p_market_b": p_market_b,
-            "edge_a": edge_a,
-            "edge_b": edge_b,
-            "signal": _signal(ta, edge_a, min_edge),
-            "volume": _safe_float(m.get("volume"), 0.0),
-            "fetch_timestamp": str(m.get("fetch_timestamp", "")),
-        })
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-
-    df["abs_edge"] = df[["edge_a", "edge_b"]].abs().max(axis=1)
-    if min_edge > 0:
-        df = df[df["abs_edge"] >= min_edge].copy()
-    return df.sort_values("abs_edge", ascending=False).reset_index(drop=True)
+    return out
 
 
-def append_edge_log(scan_df: pd.DataFrame, scan_ts: str | None = None) -> Path:
-    """Append scan rows to edge_log/edges.csv for forward testing / CLV."""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    ts = scan_ts or datetime.now(timezone.utc).isoformat()
+def save_edge_log(df: pd.DataFrame, log_path: Path):
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    stamped = df.copy()
+    stamped["scanned_at_utc"] = datetime.now(timezone.utc).isoformat()
 
-    log = scan_df.copy()
-    log.insert(0, "scan_timestamp", ts)
-    log["result"] = ""  # fill after match: team_a_won / team_b_won / void
+    if log_path.exists():
+        prev = pd.read_csv(log_path, low_memory=False)
+        stamped = pd.concat([prev, stamped], ignore_index=True)
 
-    cols = [
-        "scan_timestamp", "market_id", "match_label", "team_a", "team_b",
-        "mapped_match_id", "p_model_a", "p_market_a", "edge_a", "signal",
-        "volume", "question", "result",
-    ]
-    cols = [c for c in cols if c in log.columns]
-    log = log[cols]
-
-    if LOG_PATH.exists():
-        log.to_csv(LOG_PATH, mode="a", header=False, index=False)
-    else:
-        log.to_csv(LOG_PATH, index=False)
-    return LOG_PATH
+    stamped.to_csv(log_path, index=False)
+    print(f"Saved edge log -> {log_path}")
 
 
-def format_scan_table(df: pd.DataFrame, min_edge: float) -> str:
-    w = 52
-    lines = [
-        "=" * w,
-        " StrikeRate - Market Edge Scanner",
-        "=" * w,
-        f" {'MATCH':<14} {'MODEL':>7} {'MARKET':>7} {'EDGE':>7}  SIGNAL",
-        "-" * w,
-    ]
-    if df.empty:
-        lines.append(" No markets above edge threshold.")
-        lines.append(f" (min |edge| = {min_edge:.0%})")
-    else:
-        for _, r in df.iterrows():
-            match = str(r["match_label"])[:14]
-            model_p = f"{r['p_model_a']:.0%}"
-            mkt_p = f"{r['p_market_a']:.0%}"
-            edge = f"{r['edge_a']:+.0%}"
-            sig = str(r["signal"])
-            lines.append(f" {match:<14} {model_p:>7} {mkt_p:>7} {edge:>7}  {sig}")
-    lines.append("=" * w)
-    return "\n".join(lines)
+def main():
+    parser = argparse.ArgumentParser(description="StrikeRate edge scanner")
+    parser.add_argument("--input", type=str, default=None, help="Input CSV with pre-match features")
+    parser.add_argument("--threshold", type=float, default=0.05, help="Minimum absolute edge")
+    parser.add_argument("--top", type=int, default=10, help="How many rows to show")
+    parser.add_argument("--log", action="store_true", help="Append scan output to edge log CSV")
+    parser.add_argument("--log-path", type=str, default=str(PROCESSED_DIR / "edge_log.csv"))
+    args = parser.parse_args()
+
+    df = load_input(args.input)
+    scored = score_matches(df)
+    edges = build_edges(scored, threshold=args.threshold)
+
+    sort_col = "abs_edge" if "abs_edge" in edges.columns else "p_model"
+    view_cols = [c for c in ["match_id", "season", "start_date", "team1", "team2", "venue", "p_model", "p_market", "edge", "recommendation", "kelly_fraction"] if c in edges.columns]
+    ranked = edges.sort_values(sort_col, ascending=False).head(args.top)
+
+    print("\n── Top scan results ──")
+    print(ranked[view_cols].to_string(index=False))
+
+    if args.log:
+        save_edge_log(edges[view_cols], Path(args.log_path))
 
 
-def fetch_odds_subprocess() -> None:
-    py = sys.executable
-    script = ROOT / "pipeline" / "fetch_polymarket_odds.py"
-    subprocess.check_call([py, str(script)], cwd=str(ROOT))
-
-
-def run_scan(
-    *,
-    fetch: bool = True,
-    min_edge: float = 0.05,
-    train_if_missing: bool = True,
-    log: bool = True,
-    save_csv: bool = True,
-) -> pd.DataFrame:
-    if fetch:
-        print("Fetching Polymarket odds...")
-        fetch_odds_subprocess()
-
-    if not MODEL_PATH.exists():
-        if not train_if_missing:
-            raise FileNotFoundError(
-                f"Missing {MODEL_PATH}. Run: python strike.py train-prematch"
-            )
-        model = ensure_calibrated_model()
-    else:
-        model = load_calibrated_model()
-
-    odds = load_odds()
-    pre = load_pre_match()
-    table = build_edge_table(odds, pre, model, min_edge=min_edge)
-
-    scan_ts = datetime.now(timezone.utc).isoformat()
-    print(format_scan_table(table, min_edge))
-    print(f"\nMarkets scanned: {len(odds)}  |  Edges flagged: {len(table)}")
-    print(f"Signal source: {MODEL_PATH.name} (honest pre-match)")
-
-    if save_csv and len(table):
-        out = Path(PROCESSED_DIR) / "value_bets.csv"
-        table.to_csv(out, index=False)
-        print(f"Saved: {out}")
-
-    if log and len(table):
-        path = append_edge_log(table, scan_ts)
-        print(f"Appended edge log: {path}")
-
-    meta = {
-        "scan_timestamp": scan_ts,
-        "n_markets": len(odds),
-        "n_edges": len(table),
-        "min_edge": min_edge,
-        "model_path": str(MODEL_PATH),
-    }
-    (Path(PROCESSED_DIR) / "scan_meta.json").write_text(
-        json.dumps(meta, indent=2), encoding="utf-8"
-    )
-    return table
+if __name__ == "__main__":
+    main()
